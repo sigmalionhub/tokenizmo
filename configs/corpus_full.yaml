@@ -1,0 +1,36 @@
+# Corpus config for full 262k vocabulary training.
+# Requires downloading the datasets listed below.
+# See Tasks/TASK-02-corpus-training.md for download instructions.
+
+mix_ratios:
+  en: 0.4
+  ru: 0.4
+  code: 0.2
+
+sources:
+  # English prose — Wikipedia EN dump
+  # Download: https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2
+  # Convert with: python scripts/convert_wiki.py enwiki ... --output data/corpus/wiki_en.jsonl.gz
+  - path: data/corpus/wiki_en.jsonl.gz
+    language: en
+    reader: jsonl_gz
+    text_field: text
+
+  # Russian prose — Wikipedia RU dump
+  - path: data/corpus/wiki_ru.jsonl.gz
+    language: ru
+    reader: jsonl_gz
+    text_field: text
+
+  # Code — The Stack (Python subset)
+  # Download via HuggingFace: datasets.load_dataset("bigcode/the-stack", data_dir="data/python")
+  - path: data/corpus/stack_python.jsonl.gz
+    language: code
+    reader: jsonl_gz
+    text_field: content
+
+  # Optional: additional Russian web text
+  # - path: data/corpus/ru_cc.jsonl.gz
+  #   language: ru
+  #   reader: jsonl_gz
+  #   text_field: text

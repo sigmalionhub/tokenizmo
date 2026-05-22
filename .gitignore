@@ -1,0 +1,38 @@
+# Rust
+target/
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Data (large files)
+data/corpus/
+data/vocab/*.vocab
+
+# Task specs and benchmark outputs
+Tasks/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# maturin
+tokenismo-py/target/
+
+# Claude Code
+.pending_task
+.claude/

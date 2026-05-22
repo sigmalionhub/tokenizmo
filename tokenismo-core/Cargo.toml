@@ -1,0 +1,21 @@
+[package]
+name = "tokenismo-core"
+version.workspace = true
+edition.workspace = true
+description = "TokeNismo tokenizer core — Unigram LM + Viterbi encoder"
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true
+memmap2.workspace = true
+ahash.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+
+[[bench]]
+name = "throughput"
+harness = false

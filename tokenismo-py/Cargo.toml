@@ -1,0 +1,15 @@
+[package]
+name = "tokenismo-py"
+version.workspace = true
+edition.workspace = true
+description = "Python bindings for TokeNismo tokenizer"
+license.workspace = true
+
+[lib]
+name = "tokenismo"
+crate-type = ["cdylib"]
+
+[dependencies]
+tokenismo-core = { path = "../tokenismo-core" }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+rayon.workspace = true

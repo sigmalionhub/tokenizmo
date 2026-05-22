@@ -1,0 +1,20 @@
+# Corpus config for small training runs using bundled sample files.
+# Used by: python trainer/train.py --corpus-config configs/corpus_sample.yaml
+
+mix_ratios:
+  en: 0.4
+  ru: 0.4
+  code: 0.2
+
+sources:
+  - path: data/samples/sample_en.txt
+    language: en
+    reader: text
+
+  - path: data/samples/sample_ru.txt
+    language: ru
+    reader: text
+
+  - path: data/samples/sample_code.py
+    language: code
+    reader: text

@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "tokenismo-core",
+    "tokenismo-py",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["TokeNismo Contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+rayon = "1.10"
+memmap2 = "0.9"
+ahash = "0.8"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
