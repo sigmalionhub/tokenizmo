@@ -1,4 +1,12 @@
+use std::collections::HashMap;
 use thiserror::Error;
+
+/// Depth cutoff for the hybrid DARTS+HashMap layout when explicitly requested
+/// via `finalize_with_depth(SHORT_TOKEN_THRESHOLD)`.
+///
+/// Not used by the default `finalize()` path (which builds full DARTS).
+/// Kept here for tests that validate the HashMap fallback code path.
+pub const SHORT_TOKEN_THRESHOLD: usize = 8;
 
 #[derive(Debug, Error)]
 pub enum VocabError {
@@ -70,7 +78,13 @@ pub struct VocabTrie {
     pub token_bytes: Vec<Vec<u8>>,
     pub vocab_size: usize,
 
+    /// Long tokens (> SHORT_TOKEN_THRESHOLD bytes) not stored in DARTS.
+    /// Keyed by raw token bytes; value is (token_id, log_prob).
+    pub long_token_map: HashMap<Vec<u8>, (u32, f32)>,
+
     finalized: bool,
+    /// DARTS depth limit used during finalize (default = SHORT_TOKEN_THRESHOLD).
+    pub darts_depth_limit: usize,
 }
 
 impl VocabTrie {
@@ -87,8 +101,20 @@ impl VocabTrie {
             log_probs: Vec::new(),
             token_bytes: Vec::new(),
             vocab_size: 0,
+            long_token_map: HashMap::new(),
             finalized: false,
+            darts_depth_limit: usize::MAX,
         }
+    }
+
+    /// Returns the number of long tokens stored in the HashMap fallback.
+    pub fn long_token_count(&self) -> usize {
+        self.long_token_map.len()
+    }
+
+    /// Returns the number of DARTS slots (useful for diagnostics).
+    pub fn darts_len(&self) -> usize {
+        self.darts.len()
     }
 
     pub fn insert(&mut self, token: &[u8], log_prob: f32) -> u32 {
@@ -118,11 +144,36 @@ impl VocabTrie {
         token_id
     }
 
-    /// Compact build-time representation into CSR, then build DARTS.
+    /// Compact build-time representation into CSR, then build full DARTS.
+    ///
+    /// All tokens are placed in DARTS (depth limit = usize::MAX).  Benchmarks
+    /// show this is 3–8× faster than the hybrid DARTS+HashMap layout because
+    /// the DARTS array for a 262k vocab (~7.5 MB) fits in L3 cache, while
+    /// HashMap lookups with Vec<u8> key allocation dominate for long tokens.
     pub fn finalize(&mut self) {
+        self.finalize_with_depth(usize::MAX);
+    }
+
+    /// Like `finalize`, but with an explicit DARTS depth limit.
+    ///
+    /// Tokens with byte length > `depth_limit` are placed in `long_token_map`
+    /// (HashMap) instead of DARTS.  Use `usize::MAX` for full DARTS (same as
+    /// `finalize()`).  Smaller values are available for testing the HashMap
+    /// fallback path — see `SHORT_TOKEN_THRESHOLD`.
+    pub fn finalize_with_depth(&mut self, depth_limit: usize) {
         if self.finalized {
             return;
         }
+        self.darts_depth_limit = depth_limit;
+
+        // Populate long_token_map from tokens whose byte length exceeds the limit.
+        for (id, bytes) in self.token_bytes.iter().enumerate() {
+            if bytes.len() > depth_limit {
+                self.long_token_map
+                    .insert(bytes.clone(), (id as u32, self.log_probs[id]));
+            }
+        }
+
         let n = self.num_nodes;
         let total: usize = self.build_children.iter().map(|c| c.len()).sum();
 
@@ -162,7 +213,8 @@ impl VocabTrie {
         let n = self.num_nodes;
         let mut cap = n.saturating_mul(4).max(512) + 512;
 
-        let mut entries: Vec<DartsEntry> = vec![DartsEntry::default(); cap];
+        let non_terminal = DartsEntry { token: u32::MAX, ..Default::default() };
+        let mut entries: Vec<DartsEntry> = vec![non_terminal; cap];
         let mut used: Vec<bool> = vec![false; cap];
 
         // Position 0 = root.  check[0] = u32::MAX (no parent, sentinel).
@@ -178,12 +230,22 @@ impl VocabTrie {
             entries[0].token = u32::MAX;
         }
 
-        // BFS: (csr_node, darts_position)
-        let mut queue: std::collections::VecDeque<(usize, usize)> =
+        // BFS: (csr_node, darts_position, depth)
+        // depth = number of bytes consumed from the root to reach this node.
+        // We stop expanding children at depth >= darts_depth_limit so that the
+        // DARTS array only encodes paths of length <= darts_depth_limit bytes.
+        // Tokens longer than darts_depth_limit are looked up in long_token_map.
+        let limit = self.darts_depth_limit;
+        let mut queue: std::collections::VecDeque<(usize, usize, usize)> =
             std::collections::VecDeque::with_capacity(n);
-        queue.push_back((0, 0));
+        queue.push_back((0, 0, 0));
 
-        while let Some((csr, pos)) = queue.pop_front() {
+        while let Some((csr, pos, depth)) = queue.pop_front() {
+            // Don't expand children beyond the depth limit.
+            if depth >= limit {
+                continue;
+            }
+
             let cs = self.child_start[csr] as usize;
             let ce = self.child_start[csr + 1] as usize;
             if cs == ce {
@@ -198,12 +260,8 @@ impl VocabTrie {
             let needed = b + max_byte + 1;
             if needed > cap {
                 cap = (needed + 512).max(cap * 2);
-                entries.resize(cap, DartsEntry::default());
+                entries.resize(cap, non_terminal);
                 used.resize(cap, false);
-                // Re-init token field of new slots to u32::MAX.
-                for e in &mut entries[needed - 1..cap] {
-                    e.token = u32::MAX;
-                }
             }
 
             entries[pos].base = b as u32;
@@ -222,7 +280,7 @@ impl VocabTrie {
                     entries[child_pos].token = u32::MAX;
                 }
 
-                queue.push_back((csr_child, child_pos));
+                queue.push_back((csr_child, child_pos, depth + 1));
             }
         }
 

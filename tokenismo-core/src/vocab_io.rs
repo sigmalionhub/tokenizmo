@@ -1,6 +1,7 @@
 use std::io::{Read, Write, BufWriter};
 use std::path::Path;
 use crate::vocab::{VocabTrie, VocabError};
+use crate::trainer::TrainVocab;
 
 const MAGIC: &[u8; 4] = b"NXT1";
 
@@ -24,6 +25,14 @@ pub fn save_vocab(trie: &VocabTrie, path: &Path) -> Result<(), VocabError> {
 
 /// Load vocab from binary format produced by `save_vocab`.
 pub fn load_vocab(path: &Path) -> Result<VocabTrie, VocabError> {
+    load_vocab_with_depth(path, usize::MAX)
+}
+
+/// Load vocab and finalize with an explicit DARTS depth limit.
+///
+/// Use `usize::MAX` for full DARTS (all tokens in trie, no HashMap fallback).
+/// Use `SHORT_TOKEN_THRESHOLD` (the default) for the hybrid DARTS+HashMap layout.
+pub fn load_vocab_with_depth(path: &Path, depth_limit: usize) -> Result<VocabTrie, VocabError> {
     let mut file = std::fs::File::open(path)?;
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic)?;
@@ -46,8 +55,33 @@ pub fn load_vocab(path: &Path) -> Result<VocabTrie, VocabError> {
         let log_prob = f32::from_le_bytes(lp_buf);
         trie.insert(&tok, log_prob);
     }
-    trie.finalize();
+    trie.finalize_with_depth(depth_limit);
     Ok(trie)
+}
+
+/// Save a training vocab (from the trainer) to the binary .vocab format.
+/// The order of tokens in TrainVocab becomes the token ID assignment in the file.
+pub fn save_vocab_from_train(vocab: &TrainVocab, path: &Path) -> Result<(), VocabError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut w = BufWriter::new(file);
+    w.write_all(MAGIC)?;
+    w.write_all(&(vocab.len() as u32).to_le_bytes())?;
+    for entry in vocab.iter() {
+        if entry.token.len() > 255 {
+            return Err(VocabError::InvalidFormat(format!(
+                "token too long ({} bytes): {:?}",
+                entry.token.len(),
+                entry.token
+            )));
+        }
+        w.write_all(&[entry.token.len() as u8])?;
+        w.write_all(&entry.token)?;
+        w.write_all(&entry.log_prob.to_le_bytes())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

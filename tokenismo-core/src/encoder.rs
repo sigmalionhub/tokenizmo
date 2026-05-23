@@ -1,6 +1,9 @@
 use std::sync::Arc;
 use crate::vocab::VocabTrie;
 
+/// Max token byte length considered during encoding (must match training).
+const MAX_TOKEN_LEN: usize = 32;
+
 /// Bit-flag: set on token ID when the token is preceded by a space.
 pub const LEADING_SPACE_FLAG: u32 = 1 << 22;
 
@@ -80,6 +83,7 @@ impl Encoder {
 
         let darts_ptr = trie.darts.as_ptr();
         let darts_len = trie.darts.len() as u32;
+        let long_map = &trie.long_token_map;
 
         for i in 0..n {
             // SAFETY: i < n, dp_buf.len() == n+1
@@ -100,19 +104,22 @@ impl Encoder {
             let base_prev = i as u32;
             let space_flag: u32 = if leading_space { LEADING_SPACE_FLAG } else { 0 };
 
-            // ── DARTS inner walk ───────────────────────────────────────────────
-            //
-            // Inlined to enable: (a) reading both fields from one cache line
-            // without a function-call boundary, and (b) placing the prefetch
-            // hint immediately after computing `t` for maximum lead time.
+            // ── DARTS inner walk (depth 0..darts_depth_limit) ────────────────
             //
             // SAFETY invariants maintained throughout:
             //   • `node` starts at 0 (valid) and only advances via validated DARTS transitions.
             //   • `t` is bounds-checked before any dereference.
             //   • `j` ∈ scan_start..n ⊆ 0..bytes.len().
             //   • `end = j+1 ≤ n`, dp_buf.len() == n+1.
+            let depth_limit = trie.darts_depth_limit;
             let mut node = 0u32;
+            let mut darts_depth = 0usize;
             for j in scan_start..n {
+                // Hard limit: DARTS only covers the first `depth_limit` bytes.
+                if darts_depth >= depth_limit {
+                    break;
+                }
+
                 let byte = unsafe { *bytes.get_unchecked(j) };
 
                 // Load current-node entry (L1 cache hit from previous iter, except first).
@@ -136,6 +143,7 @@ impl Encoder {
                     break;
                 }
                 node = t;
+                darts_depth += 1;
 
                 // Terminal: update DP if this candidate is better.
                 if child.token != u32::MAX {
@@ -148,6 +156,31 @@ impl Encoder {
                     let slot = unsafe { dp_buf.get_unchecked_mut(j + 1) };
                     if candidate.is_better_than(slot) {
                         *slot = candidate;
+                    }
+                }
+            }
+
+            // ── HashMap fallback for long tokens ──────────────────────────────
+            //
+            // Only triggered when DARTS reached full depth_limit, which guarantees
+            // the first depth_limit bytes form a valid trie prefix — a necessary
+            // condition for any long token to match here.
+            if darts_depth >= depth_limit && !long_map.is_empty() {
+                let max_end = (scan_start + MAX_TOKEN_LEN).min(n);
+                for end in (scan_start + depth_limit + 1)..=max_end {
+                    // SAFETY: scan_start and end are within 0..n (bounds checked above).
+                    let tok = unsafe { bytes.get_unchecked(scan_start..end) };
+                    if let Some(&(tid, lp)) = long_map.get(tok) {
+                        let candidate = DpEntry {
+                            count: base_count,
+                            neg_log_prob: base_neg_lp - lp,
+                            prev_pos: base_prev,
+                            token_id: tid | space_flag,
+                        };
+                        let slot = unsafe { dp_buf.get_unchecked_mut(end) };
+                        if candidate.is_better_than(slot) {
+                            *slot = candidate;
+                        }
                     }
                 }
             }
@@ -171,10 +204,14 @@ impl Encoder {
 
         // ── Backtrack ────────────────────────────────────────────────────────
         if dp_buf[n].count == u32::MAX {
-            for &byte in bytes {
-                out.push(byte as u32);
-            }
-            return;
+            // Every byte must be reachable via add_guaranteed_tokens; if we get
+            // here the vocabulary is missing coverage (binary input or broken
+            // vocab).  Panic loudly rather than silently emitting wrong IDs.
+            panic!(
+                "encode: text not fully reachable — \
+                 vocabulary missing coverage for input of {} bytes",
+                n
+            );
         }
 
         let token_count = dp_buf[n].count as usize;
@@ -206,47 +243,66 @@ impl Encoder {
 
     /// Encode `text` into token IDs.
     ///
-    /// Inputs < `PARALLEL_THRESHOLD` bytes are encoded on the calling thread.
-    /// Larger inputs are split at space boundaries into `CHUNK_SIZE`-byte
-    /// chunks and processed in parallel via Rayon.
+    /// Inputs shorter than `PARALLEL_THRESHOLD` bytes are encoded on the
+    /// calling thread.  Longer inputs are split into word-level chunks and
+    /// processed in parallel via Rayon.
+    ///
+    /// The split keeps spaces at the **start** of the following chunk so that
+    /// `encode_into` applies `LEADING_SPACE_FLAG` correctly — producing the
+    /// same token IDs as encoding the whole string in one pass.
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        const PARALLEL_THRESHOLD: usize = 4 * 1024; // 4 KB — lower than before
-        const CHUNK_SIZE: usize = 4 * 1024;
+        // Below threshold: single-thread is faster (no Rayon spawn overhead).
+        const PARALLEL_THRESHOLD: usize = 1024;
+        // Accumulate words into a chunk until it reaches this size, then split.
+        const MIN_CHUNK_BYTES: usize = 256;
 
-        if text.len() < PARALLEL_THRESHOLD {
+        let bytes = text.as_bytes();
+        if bytes.len() < PARALLEL_THRESHOLD {
             return self.encode_chunk(text);
         }
 
         use rayon::prelude::*;
-        split_at_spaces(text.as_bytes(), CHUNK_SIZE)
+        split_words(bytes, MIN_CHUNK_BYTES)
             .into_par_iter()
-            .flat_map_iter(|chunk| self.encode_chunk(chunk))
+            .flat_map_iter(|chunk| {
+                // SAFETY: split_words only splits at ASCII 0x20 boundaries,
+                // which are always valid UTF-8 code-unit positions.
+                let s = unsafe { std::str::from_utf8_unchecked(chunk) };
+                self.encode_chunk(s)
+            })
             .collect()
     }
 }
 
-fn split_at_spaces(bytes: &[u8], chunk_size: usize) -> Vec<&str> {
+/// Split `bytes` into chunks at word boundaries for parallel encoding.
+///
+/// Spaces are grouped with the *following* word so `encode_into` sees the
+/// leading space and sets `LEADING_SPACE_FLAG` correctly — producing
+/// identical token IDs to encoding the whole string in one pass.
+///
+/// Words accumulate into a chunk until it reaches `min_bytes`; the split
+/// then falls on the next word boundary so no token ever spans a chunk edge.
+fn split_words(bytes: &[u8], min_bytes: usize) -> Vec<&[u8]> {
     let n = bytes.len();
-    let mut chunks = Vec::with_capacity(n / chunk_size + 1);
-    let mut start = 0;
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0;
+    let mut i = 0;
 
-    while start < n {
-        let mut end = (start + chunk_size).min(n);
-        if end < n {
-            if let Some(pos) = bytes[start + 1..end]
-                .iter()
-                .rposition(|&b| b == b' ')
-            {
-                end = start + 1 + pos + 1;
-            } else {
-                while end > start && (bytes[end] & 0xC0) == 0x80 {
-                    end -= 1;
-                }
-            }
+    while i < n {
+        // Consume optional leading spaces then a non-space word.
+        while i < n && bytes[i] == b' ' { i += 1; }
+        while i < n && bytes[i] != b' ' { i += 1; }
+        // `i` is now at a space or end-of-string — a clean word boundary.
+        // Emit a chunk once it has accumulated enough bytes, but only when
+        // there is still more text (so the last chunk is never emitted here).
+        if i - chunk_start >= min_bytes && i < n {
+            chunks.push(&bytes[chunk_start..i]);
+            chunk_start = i;
         }
-        // SAFETY: start and end are at valid UTF-8 boundaries.
-        chunks.push(unsafe { std::str::from_utf8_unchecked(&bytes[start..end]) });
-        start = end;
+    }
+
+    if chunk_start < n {
+        chunks.push(&bytes[chunk_start..n]);
     }
     chunks
 }
@@ -262,6 +318,26 @@ mod tests {
             trie.insert(tok, *lp);
         }
         Encoder::new(Arc::new(trie))
+    }
+
+    /// Build encoder with full DARTS (no HashMap) for use as reference in tests.
+    fn make_encoder_full_darts(tokens: &[(&[u8], f32)]) -> Encoder {
+        let mut trie = VocabTrie::new();
+        for (tok, lp) in tokens {
+            trie.insert(tok, *lp);
+        }
+        trie.finalize_with_depth(usize::MAX);
+        Encoder { trie: Arc::new(trie) }
+    }
+
+    /// Build encoder with hybrid DARTS+HashMap using given depth limit.
+    fn make_encoder_hybrid(tokens: &[(&[u8], f32)], depth: usize) -> Encoder {
+        let mut trie = VocabTrie::new();
+        for (tok, lp) in tokens {
+            trie.insert(tok, *lp);
+        }
+        trie.finalize_with_depth(depth);
+        Encoder { trie: Arc::new(trie) }
     }
 
     #[test]
@@ -291,7 +367,7 @@ mod tests {
     #[test]
     fn encode_empty() {
         let enc = make_encoder(&[(b"a", -1.0)]);
-        assert_eq!(enc.encode(""), vec![]);
+        assert_eq!(enc.encode(""), Vec::<u32>::new());
     }
 
     #[test]
@@ -308,5 +384,112 @@ mod tests {
             let base_id = id & !(LEADING_SPACE_FLAG);
             assert!((base_id as usize) < enc.trie.vocab_size);
         }
+    }
+
+    /// Validation: hybrid DARTS+HashMap must produce identical token sequences
+    /// to the full DARTS encoder.  Tests short tokens, long tokens (> threshold),
+    /// tokens that share prefixes, and leading-space tokens.
+    #[test]
+    fn hybrid_matches_full_darts() {
+        // Build a vocab mixing short (≤ 8 bytes) and long (> 8 bytes) tokens.
+        // Short: "a", " ", "the", "hello", "world", "12345678" (8 bytes)
+        // Long:  "123456789" (9B), "tokenized" (9B), "representation" (14B)
+        // Single-byte fallbacks cover all ASCII so the Viterbi never hits the
+        // unreachable-text panic (required since the vocab has no per-byte coverage).
+        let mut tokens_vec: Vec<(&[u8], f32)> = vec![
+            (b"a",               -2.0),
+            (b" ",               -0.5),
+            (b"the",             -1.0),
+            (b"hello",           -1.2),
+            (b"world",           -1.2),
+            (b"12345678",        -1.5),   // exactly 8 bytes → DARTS
+            (b"123456789",       -1.4),   // 9 bytes → HashMap
+            (b"tokenized",       -1.3),   // 9 bytes → HashMap
+            (b"representation",  -1.6),   // 14 bytes → HashMap
+            (b"token",           -1.1),   // 5 bytes → DARTS (prefix of "tokenized")
+        ];
+        // Low-probability single-byte fallbacks for full ASCII coverage.
+        let fallback_bytes: Vec<Vec<u8>> = (0u8..=127)
+            .filter(|b| !matches!(b, b'a' | b' '))
+            .map(|b| vec![b])
+            .collect();
+        for fb in &fallback_bytes {
+            tokens_vec.push((fb.as_slice(), -10.0));
+        }
+        let tokens = tokens_vec.as_slice();
+
+        let texts = [
+            "hello world",
+            "the representation",
+            "123456789",
+            "tokenized",
+            "a the a",
+            "12345678 tokenized representation hello",
+            // Longer text to stress Viterbi DP with mixed short+long tokens
+            "hello the tokenized representation of 12345678 and 123456789",
+        ];
+
+        let full = make_encoder_full_darts(tokens);
+        let hybrid = make_encoder_hybrid(tokens, 8);
+
+        // Sanity: hybrid has long tokens in HashMap, not in DARTS
+        assert_eq!(hybrid.trie.long_token_count(), 3,
+            "expected 3 long tokens (123456789, tokenized, representation)");
+
+        for text in &texts {
+            let ids_full   = full.encode(text);
+            let ids_hybrid = hybrid.encode(text);
+            assert_eq!(
+                ids_full, ids_hybrid,
+                "mismatch for {:?}\n  full:   {:?}\n  hybrid: {:?}",
+                text, ids_full, ids_hybrid
+            );
+        }
+    }
+
+    /// Edge case: text that uses ONLY long tokens (> threshold).
+    #[test]
+    fn hybrid_long_token_only_text() {
+        let tokens: &[(&[u8], f32)] = &[
+            (b"a",              -3.0),  // fallback char
+            (b" ",              -0.5),
+            (b"abcdefghi",      -1.0),  // 9 bytes → HashMap
+            (b"abcdefghij",     -0.9),  // 10 bytes → HashMap (better than 9+a)
+        ];
+        let full   = make_encoder_full_darts(tokens);
+        let hybrid = make_encoder_hybrid(tokens, 8);
+
+        let text = "abcdefghij";
+        let ids_full   = full.encode(text);
+        let ids_hybrid = hybrid.encode(text);
+        assert_eq!(ids_full, ids_hybrid,
+            "long-only mismatch: full={:?} hybrid={:?}", ids_full, ids_hybrid);
+        // Should use the single 10-byte token, not the 9-byte one + "a"
+        assert_eq!(ids_full.len(), 1, "expected 1 token for 'abcdefghij'");
+    }
+
+    /// Edge case: long token preceded by space (LEADING_SPACE_FLAG must be set).
+    #[test]
+    fn hybrid_long_token_with_leading_space() {
+        let tokens: &[(&[u8], f32)] = &[
+            (b"a",             -3.0),
+            (b" ",             -0.5),
+            (b"hello",         -1.0),
+            (b"tokenized",     -1.0),  // 9 bytes → HashMap
+        ];
+        let full   = make_encoder_full_darts(tokens);
+        let hybrid = make_encoder_hybrid(tokens, 8);
+
+        let text = "hello tokenized";
+        let full_ids   = full.encode(text);
+        let hybrid_ids = hybrid.encode(text);
+        assert_eq!(full_ids, hybrid_ids,
+            "leading-space mismatch: full={:?} hybrid={:?}", full_ids, hybrid_ids);
+
+        // The second token should have LEADING_SPACE_FLAG set
+        assert!(hybrid_ids.len() >= 2);
+        let second = hybrid_ids[1];
+        assert!(second & LEADING_SPACE_FLAG != 0,
+            "expected LEADING_SPACE_FLAG on 'tokenized' token, got id={second}");
     }
 }
