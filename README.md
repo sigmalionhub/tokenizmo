@@ -20,11 +20,11 @@ tokenismo v6 (262k vocab) beats every competitor on compression **and** throughp
 
 ### Throughput (MB/s on 64 KB input — higher is better)
 
-| Tokenizer          |       EN |       RU |     Code | vs o200k |
-|:-------------------|---------:|---------:|---------:|---------:|
-| tiktoken cl100k    |      8.8 |      8.1 |      5.4 |     0.7x |
-| tiktoken o200k     |     13.5 |      8.1 |      6.3 |     1.0x |
-| **tokenismo v6**   |   **76.0** | **92.0** | **55.8** | **5.6x** |
+| Tokenizer          |        EN |        RU |      Code |
+|:-------------------|----------:|----------:|----------:|
+| tiktoken cl100k    |       8.8 |       8.1 |       5.4 |
+| tiktoken o200k     |      13.5 |       8.1 |       6.3 |
+| **tokenismo v6**   |  **76.0** |  **92.0** |  **55.8** |
 
 ### tokenismo v6 vs tiktoken o200k
 
@@ -49,11 +49,12 @@ Corpus → Seed candidates (all substrings ≤ 32 bytes)
 
 Key design choices:
 
-- **Viterbi DP** — globally optimal segmentation (minimum tokens, maximum log-prob tiebreak) rather than greedy BPE
-- **`LEADING_SPACE_FLAG = 1 << 22`** — leading spaces are encoded as a bit flag on the following token, eliminating standalone space tokens
-- **Thread-local DP buffer** — avoids O(n) heap allocation per `encode()` call; buffer is reused across calls on the same thread
-- **Unicode-aware pruning** — Cyrillic, CJK, and other multi-byte single characters are never pruned from the vocabulary
-- **Graceful OOV handling** — characters outside the vocabulary emit `<unk>` per UTF-8 character; bytes after the gap are re-encoded normally rather than lost
+- **Viterbi DP** — globally optimal segmentation (minimum tokens, maximum log-prob tiebreak) rather than greedy BPE.
+- **Indentation Pre-tokenizer** — multi-space sequences (2, 4, 8 spaces) are isolated into structural chunks before Viterbi decoding. This prevents combinatorial explosion in the DP graph for code files and leverages atomic caching.
+- **`LEADING_SPACE_FLAG = 1 << 22`** — leading spaces are encoded as a bit flag on the following token ID in runtime, eliminating standalone space tokens.
+- **Thread-local DP buffer** — avoids O(n) heap allocation per `encode()` call; buffer is reused across calls on the same thread.
+- **Unicode-aware pruning** — Cyrillic, CJK, and other multi-byte single characters are never pruned from the vocabulary.
+- **Graceful OOV handling** — characters outside the vocabulary emit `<unk>` per UTF-8 character; bytes after the gap are re-encoded normally rather than lost.
 
 ## Quick Start
 
