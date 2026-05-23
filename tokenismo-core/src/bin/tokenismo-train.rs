@@ -135,30 +135,17 @@ fn validate_vocab(vocab: &tokenismo_core::trainer::TrainVocab, docs: &[String]) 
     println!("  Avg token byte length: {:.2}", avg_token_bytes);
     println!("  Multi-byte tokens: {} ({:.1}%)", multi_char, 100.0 * multi_char as f64 / total_tokens as f64);
 
-    // Quick chars/token estimate on first doc.
+    // Chars/token estimate on first doc using actual Viterbi DP (matches encoder behaviour).
     if let Some(doc) = docs.first() {
         let end = doc.char_indices().nth(500).map(|(i, _)| i).unwrap_or(doc.len());
         let sample: &str = &doc[..end];
         let total_chars = sample.chars().count();
-        // Estimate: walk tokens greedily for a rough count.
-        let mut pos = 0usize;
-        let bytes = sample.as_bytes();
-        let mut token_count = 0usize;
-        while pos < bytes.len() {
-            let mut best_len = 1usize;
-            let mut node = 0u32;
-            for j in pos..bytes.len().min(pos + 32) {
-                node = trie.child(node, bytes[j]);
-                if node == 0 { break; }
-                if trie.token_id_at(node).is_some() {
-                    best_len = j - pos + 1;
-                }
-            }
-            pos += best_len;
-            token_count += 1;
-        }
+
+        trie.finalize();
+        let enc = tokenismo_core::Encoder::new(std::sync::Arc::new(trie));
+        let token_count = enc.encode(sample).len();
         if token_count > 0 {
-            println!("  Estimated chars/token (greedy, 1st doc): {:.2}",
+            println!("  Chars/token (Viterbi, 1st doc 500 chars): {:.2}",
                 total_chars as f64 / token_count as f64);
         }
     }
