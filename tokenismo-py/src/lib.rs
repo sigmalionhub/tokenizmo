@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
+use numpy::{PyArray1, IntoPyArray};
 use tokenismo_core::{Encoder, Decoder};
 use tokenismo_core::vocab_io::load_vocab;
 use std::sync::Arc;
@@ -25,9 +26,15 @@ impl TokeNismo {
         })
     }
 
-    /// Encode a string into token IDs.
+    /// Encode a string into token IDs as a Python list[int].
     pub fn encode(&self, text: &str) -> Vec<u32> {
         self.encoder.encode(text)
+    }
+
+    /// Encode a string into token IDs as a numpy uint32 array.
+    /// Faster than encode() — avoids boxing each token as a Python int.
+    pub fn encode_numpy<'py>(&self, py: Python<'py>, text: &str) -> Bound<'py, PyArray1<u32>> {
+        self.encoder.encode(text).into_pyarray_bound(py)
     }
 
     /// Encode a batch of strings in parallel. Releases the GIL.
@@ -36,6 +43,20 @@ impl TokeNismo {
             let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
             tokenismo_core::encode_batch(&self.encoder, &refs)
         })
+    }
+
+    /// Encode a batch of strings in parallel, returning a list of numpy arrays.
+    /// Releases the GIL during encoding.
+    pub fn encode_batch_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        texts: Vec<String>,
+    ) -> Vec<Bound<'py, PyArray1<u32>>> {
+        let results = py.allow_threads(|| {
+            let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+            tokenismo_core::encode_batch(&self.encoder, &refs)
+        });
+        results.into_iter().map(|ids| ids.into_pyarray_bound(py)).collect()
     }
 
     /// Decode token IDs back to a string.

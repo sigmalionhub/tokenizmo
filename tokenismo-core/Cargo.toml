@@ -11,6 +11,17 @@ memmap2.workspace = true
 ahash.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+flate2.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+unicode-normalization.workspace = true
+indicatif.workspace = true
+
+[[bin]]
+name = "tokenismo-train"
+path = "src/bin/tokenismo-train.rs"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

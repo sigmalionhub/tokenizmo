@@ -1,0 +1,22 @@
+# Corpus config using available files (no The Stack).
+# Code source: sample_code.py (substitute until stack_python.jsonl.gz is downloaded).
+
+mix_ratios:
+  en: 0.4
+  ru: 0.4
+  code: 0.2
+
+sources:
+  - path: data/corpus/wiki_en.jsonl.gz
+    language: en
+    reader: jsonl_gz
+    text_field: text
+
+  - path: data/corpus/wiki_ru.jsonl.gz
+    language: ru
+    reader: jsonl_gz
+    text_field: text
+
+  - path: data/samples/sample_code.py
+    language: code
+    reader: text

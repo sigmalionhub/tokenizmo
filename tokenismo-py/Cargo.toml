@@ -12,4 +12,5 @@ crate-type = ["cdylib"]
 [dependencies]
 tokenismo-core = { path = "../tokenismo-core" }
 pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
 rayon.workspace = true

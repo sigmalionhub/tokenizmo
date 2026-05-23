@@ -2,6 +2,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use std::path::Path;
 use std::sync::Arc;
 use tokenismo_core::{vocab_io, Encoder, VocabTrie};
+use tokenismo_core::vocab::SHORT_TOKEN_THRESHOLD;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -14,16 +15,19 @@ fn make_ascii_encoder() -> Encoder {
 }
 
 fn load_real_encoder() -> Option<Encoder> {
-    // Look for the trained vocab relative to the workspace root.
+    // Prefer the latest Rust-trained 262k vocab; fall back to Python vocab.
     let candidates = [
+        "data/vocab/tokenismo_262k_rust_v4.vocab",
+        "data/vocab/tokenismo_262k_rust_v3.vocab",
         "data/vocab/tokenismo.vocab",
+        "../data/vocab/tokenismo_262k_rust_v4.vocab",
         "../data/vocab/tokenismo.vocab",
-        "../../data/vocab/tokenismo.vocab",
     ];
     for p in &candidates {
         if Path::new(p).exists() {
             match vocab_io::load_vocab(Path::new(p)) {
                 Ok(trie) => {
+                    eprintln!("Loaded vocab: {p}");
                     let enc = Encoder::new(Arc::new(trie));
                     return Some(enc);
                 }
@@ -111,5 +115,67 @@ fn bench_chunk_sizes(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_ascii_vocab, bench_real_vocab, bench_chunk_sizes);
+fn bench_hybrid_vs_full_darts(c: &mut Criterion) {
+    let candidates = [
+        "data/vocab/tokenismo_262k_rust_v4.vocab",
+        "data/vocab/tokenismo_262k_rust_v3.vocab",
+        "data/vocab/tokenismo.vocab",
+        "../data/vocab/tokenismo_262k_rust_v4.vocab",
+        "../data/vocab/tokenismo.vocab",
+    ];
+    let vocab_path = candidates.iter().find(|p| Path::new(p).exists()).copied();
+    let Some(p) = vocab_path else {
+        eprintln!("Skipping hybrid bench: no vocab file found");
+        return;
+    };
+
+    let hybrid_trie = vocab_io::load_vocab_with_depth(Path::new(p), SHORT_TOKEN_THRESHOLD)
+        .expect("load hybrid");
+    let full_trie = vocab_io::load_vocab_with_depth(Path::new(p), usize::MAX)
+        .expect("load full darts");
+
+    eprintln!(
+        "DARTS nodes — hybrid: {}  full: {}  (long-token map: {} entries)",
+        hybrid_trie.darts_len(),
+        full_trie.darts_len(),
+        hybrid_trie.long_token_count(),
+    );
+
+    let hybrid_enc = Encoder { trie: Arc::new(hybrid_trie) };
+    let full_enc   = Encoder { trie: Arc::new(full_trie) };
+
+    let samples: &[(&str, &str)] = &[
+        (
+            "en_prose",
+            "The tokenizer converts raw text into a sequence of integer token IDs \
+             that a language model can process. Good tokenization balances vocabulary \
+             coverage, compression ratio, and encoding speed. ",
+        ),
+        (
+            "ru_prose",
+            "Токенизатор преобразует исходный текст в последовательность целочисленных \
+             идентификаторов токенов, которые может обработать языковая модель. \
+             Хорошая токенизация балансирует между покрытием словаря и скоростью. ",
+        ),
+    ];
+
+    for (label, sample) in samples {
+        let repeat = (64 * 1024 / sample.len()).max(1);
+        let data: String = sample.repeat(repeat);
+
+        let mut group = c.benchmark_group(format!("hybrid_vs_full/{label}"));
+        group.throughput(Throughput::Bytes(data.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("hybrid_darts", label), &data, |b, d| {
+            b.iter(|| hybrid_enc.encode(std::hint::black_box(d.as_str())))
+        });
+        group.bench_with_input(BenchmarkId::new("full_darts", label), &data, |b, d| {
+            b.iter(|| full_enc.encode(std::hint::black_box(d.as_str())))
+        });
+
+        group.finish();
+    }
+}
+
+criterion_group!(benches, bench_ascii_vocab, bench_real_vocab, bench_chunk_sizes, bench_hybrid_vs_full_darts);
 criterion_main!(benches);

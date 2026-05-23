@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use crate::vocab::VocabTrie;
 
 /// Max token byte length considered during encoding (must match training).
@@ -31,6 +33,17 @@ impl DpEntry {
     }
 }
 
+/// Words longer than this bypass the cache to bound memory usage.
+const MAX_CACHE_WORD_BYTES: usize = 64;
+
+// Thread-local word cache: (trie_ptr, word_bytes) → token_ids.
+// `trie_ptr` scopes the cache to a specific encoder so multiple encoders
+// loaded on the same thread do not interfere with each other.
+thread_local! {
+    static WORD_CACHE: RefCell<(usize, HashMap<Box<[u8]>, Box<[u32]>>)> =
+        RefCell::new((0, HashMap::new()));
+}
+
 pub struct Encoder {
     pub trie: Arc<VocabTrie>,
 }
@@ -45,6 +58,11 @@ impl Encoder {
             "Encoder: call trie.finalize() before wrapping in Arc when sharing with other owners"
         );
         Self { trie }
+    }
+
+    /// Number of words cached on the calling thread.
+    pub fn cache_len(&self) -> usize {
+        WORD_CACHE.with(|cell| cell.borrow().1.len())
     }
 
     /// Viterbi DP hot path with DARTS AoS lookup and software prefetch.
@@ -228,7 +246,9 @@ impl Encoder {
         }
     }
 
-    fn encode_chunk(&self, text: &str) -> Vec<u32> {
+    /// Run Viterbi on a single word (with optional leading space) using a
+    /// thread-local DP buffer.  Caller is responsible for cache management.
+    fn viterbi_word(&self, word_bytes: &[u8]) -> Vec<u32> {
         use std::cell::RefCell;
         thread_local! {
             static DP_BUF: RefCell<Vec<DpEntry>> = RefCell::new(Vec::new());
@@ -236,75 +256,144 @@ impl Encoder {
         DP_BUF.with(|cell| {
             let mut dp_buf = cell.borrow_mut();
             let mut out = Vec::new();
-            self.encode_into(text, &mut *dp_buf, &mut out);
+            // SAFETY: split_individual_words only splits at ASCII space (0x20)
+            // boundaries, which are always valid UTF-8 code-unit positions.
+            let s = unsafe { std::str::from_utf8_unchecked(word_bytes) };
+            self.encode_into(s, &mut *dp_buf, &mut out);
             out
         })
+    }
+
+    /// Encode one word (bytes include its optional leading space).
+    ///
+    /// Checks the thread-local word cache first; on a miss runs Viterbi and
+    /// stores the result.  Thread-local lookup is ~10–20 ns (no lock), making
+    /// it cheaper than Viterbi for any word longer than ~3 bytes.
+    ///
+    /// The cache is scoped to this encoder's trie pointer so multiple
+    /// encoders on the same thread never share stale entries.
+    ///
+    /// Words longer than `MAX_CACHE_WORD_BYTES` always bypass the cache.
+    fn encode_word(&self, word_bytes: &[u8]) -> Vec<u32> {
+        if word_bytes.len() > MAX_CACHE_WORD_BYTES {
+            return self.viterbi_word(word_bytes);
+        }
+
+        let trie_ptr = Arc::as_ptr(&self.trie) as usize;
+
+        // Fast path: thread-local cache hit (no lock, no allocation).
+        let hit = WORD_CACHE.with(|cell| {
+            let (cached_ptr, map) = &mut *cell.borrow_mut();
+            if *cached_ptr != trie_ptr {
+                // Different encoder — clear stale entries.
+                map.clear();
+                *cached_ptr = trie_ptr;
+                return None;
+            }
+            map.get(word_bytes).map(|ids| ids.to_vec())
+        });
+        if let Some(ids) = hit {
+            return ids;
+        }
+
+        // Slow path: Viterbi DP.
+        let ids = self.viterbi_word(word_bytes);
+
+        // Populate cache for future calls.
+        WORD_CACHE.with(|cell| {
+            cell.borrow_mut().1.insert(word_bytes.into(), ids.clone().into_boxed_slice());
+        });
+
+        ids
+    }
+
+    /// Encode a multi-word chunk using the word cache.
+    ///
+    /// Splits `chunk` into individual words and encodes each via `encode_word`.
+    /// Used by both the single-thread and parallel paths so that Rayon task
+    /// count stays low (one task per ~256-byte chunk, not one per word).
+    fn encode_chunk_cached(&self, chunk: &[u8]) -> Vec<u32> {
+        let mut out = Vec::new();
+        for word in split_individual_words(chunk) {
+            out.extend_from_slice(&self.encode_word(word));
+        }
+        out
     }
 
     /// Encode `text` into token IDs.
     ///
     /// Inputs shorter than `PARALLEL_THRESHOLD` bytes are encoded on the
-    /// calling thread.  Longer inputs are split into word-level chunks and
-    /// processed in parallel via Rayon.
+    /// calling thread.  Longer inputs are split into ~256-byte chunks and
+    /// processed in parallel via Rayon; each chunk is further split into
+    /// words for per-word cache lookups.
     ///
-    /// The split keeps spaces at the **start** of the following chunk so that
+    /// The split keeps spaces at the **start** of each word so that
     /// `encode_into` applies `LEADING_SPACE_FLAG` correctly — producing the
     /// same token IDs as encoding the whole string in one pass.
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        // Below threshold: single-thread is faster (no Rayon spawn overhead).
         const PARALLEL_THRESHOLD: usize = 1024;
-        // Accumulate words into a chunk until it reaches this size, then split.
         const MIN_CHUNK_BYTES: usize = 256;
 
         let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+
         if bytes.len() < PARALLEL_THRESHOLD {
-            return self.encode_chunk(text);
+            return self.encode_chunk_cached(bytes);
         }
 
         use rayon::prelude::*;
         split_words(bytes, MIN_CHUNK_BYTES)
             .into_par_iter()
             .flat_map_iter(|chunk| {
-                // SAFETY: split_words only splits at ASCII 0x20 boundaries,
-                // which are always valid UTF-8 code-unit positions.
-                let s = unsafe { std::str::from_utf8_unchecked(chunk) };
-                self.encode_chunk(s)
+                // SAFETY: split_words only splits at ASCII 0x20 boundaries.
+                self.encode_chunk_cached(chunk)
             })
             .collect()
     }
 }
 
-/// Split `bytes` into chunks at word boundaries for parallel encoding.
-///
-/// Spaces are grouped with the *following* word so `encode_into` sees the
-/// leading space and sets `LEADING_SPACE_FLAG` correctly — producing
-/// identical token IDs to encoding the whole string in one pass.
-///
-/// Words accumulate into a chunk until it reaches `min_bytes`; the split
-/// then falls on the next word boundary so no token ever spans a chunk edge.
+/// Split `bytes` into ~`min_bytes`-sized chunks at word boundaries for
+/// parallel encoding.  Spaces are kept at the *start* of the following chunk.
 fn split_words(bytes: &[u8], min_bytes: usize) -> Vec<&[u8]> {
     let n = bytes.len();
     let mut chunks = Vec::new();
     let mut chunk_start = 0;
     let mut i = 0;
-
     while i < n {
-        // Consume optional leading spaces then a non-space word.
         while i < n && bytes[i] == b' ' { i += 1; }
         while i < n && bytes[i] != b' ' { i += 1; }
-        // `i` is now at a space or end-of-string — a clean word boundary.
-        // Emit a chunk once it has accumulated enough bytes, but only when
-        // there is still more text (so the last chunk is never emitted here).
         if i - chunk_start >= min_bytes && i < n {
             chunks.push(&bytes[chunk_start..i]);
             chunk_start = i;
         }
     }
-
     if chunk_start < n {
         chunks.push(&bytes[chunk_start..n]);
     }
     chunks
+}
+
+/// Split `bytes` into individual words for per-word caching.
+///
+/// Each word slice includes its optional leading spaces so that
+/// `encode_into` sees the space and sets `LEADING_SPACE_FLAG` correctly.
+///
+/// Example: `"hello world foo"` → `["hello", " world", " foo"]`
+fn split_individual_words(bytes: &[u8]) -> Vec<&[u8]> {
+    let n = bytes.len();
+    let mut words = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let start = i;
+        while i < n && bytes[i] == b' ' { i += 1; }
+        while i < n && bytes[i] != b' ' { i += 1; }
+        if i > start {
+            words.push(&bytes[start..i]);
+        }
+    }
+    words
 }
 
 #[cfg(test)]

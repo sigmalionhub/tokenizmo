@@ -1,0 +1,24 @@
+# Mix: 35% EN / 35% RU / 30% Code
+# Boosted code fraction to address code cpt regression (was 2.21 vs tiktoken 4.04).
+# Uses codeparrot/codeparrot-clean-train (150k Python files).
+
+mix_ratios:
+  en: 0.35
+  ru: 0.35
+  code: 0.30
+
+sources:
+  - path: data/corpus/wiki_en.jsonl.gz
+    language: en
+    reader: jsonl_gz
+    text_field: text
+
+  - path: data/corpus/wiki_ru.jsonl.gz
+    language: ru
+    reader: jsonl_gz
+    text_field: text
+
+  - path: data/corpus/stack_python.jsonl.gz
+    language: code
+    reader: jsonl_gz
+    text_field: content

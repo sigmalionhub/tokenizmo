@@ -23,6 +23,7 @@ pub mod encoder;
 pub mod decoder;
 pub mod batch;
 pub mod vocab_io;
+pub mod trainer;
 
 pub use encoder::Encoder;
 pub use decoder::Decoder;

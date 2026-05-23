@@ -1,0 +1,22 @@
+# Mix ratio test: 55% EN / 25% RU / 20% Code
+# Hypothesis: boosting EN share fixes EN cpt regression.
+
+mix_ratios:
+  en: 0.55
+  ru: 0.25
+  code: 0.20
+
+sources:
+  - path: data/corpus/wiki_en.jsonl.gz
+    language: en
+    reader: jsonl_gz
+    text_field: text
+
+  - path: data/corpus/wiki_ru.jsonl.gz
+    language: ru
+    reader: jsonl_gz
+    text_field: text
+
+  - path: data/samples/sample_code.py
+    language: code
+    reader: text

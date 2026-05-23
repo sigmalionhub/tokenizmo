@@ -33,7 +33,7 @@ fn roundtrip(text: &str) -> bool {
 fn empty_string_returns_empty() {
     let (enc, dec) = make_full_encoder();
     let ids = enc.encode("");
-    assert_eq!(ids, vec![], "empty string must produce no tokens");
+    assert_eq!(ids, Vec::<u32>::new(), "empty string must produce no tokens");
     assert_eq!(dec.decode(&[]).unwrap(), "");
 }
 

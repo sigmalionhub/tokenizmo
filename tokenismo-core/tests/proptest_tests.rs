@@ -64,6 +64,6 @@ proptest! {
     fn empty_string_always_empty(_s in Just("".to_string())) {
         let te = shared_encoder();
         let ids = te.encoder.encode("");
-        prop_assert_eq!(ids, vec![], "empty string must produce no tokens");
+        prop_assert_eq!(ids, Vec::<u32>::new(), "empty string must produce no tokens");
     }
 }

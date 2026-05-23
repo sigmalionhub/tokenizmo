@@ -56,30 +56,39 @@ def download_wikipedia(language: str, max_docs: int, out_path: Path) -> int:
 def download_the_stack(max_docs: int, out_path: Path) -> int:
     from datasets import load_dataset
 
-    print(f"\n[The Stack/Python] downloading up to {max_docs:,} files -> {out_path.name}")
+    print(f"\n[codeparrot/Python] downloading up to {max_docs:,} files -> {out_path.name}")
     CORPUS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # codeparrot/codeparrot-clean-train: ungated, full Python files, field=content
     ds = load_dataset(
-        "bigcode/the-stack-dedup",
-        data_dir="data/python",
-        split=f"train[:{max_docs}]",
+        "codeparrot/codeparrot-clean-train",
+        streaming=True,
+        split="train",
     )
 
     written = 0
+    skipped = 0
     t0 = time.time()
     with gzip.open(out_path, "wt", encoding="utf-8") as f:
         for doc in ds:
+            if written >= max_docs:
+                break
             content = doc.get("content", "").strip()
             if len(content) < 100:
+                skipped += 1
                 continue
             f.write(json.dumps({"content": content}, ensure_ascii=False) + "\n")
             written += 1
-            if written % 10_000 == 0:
-                print(f"  {written:,} files written...", end="\r")
+            if written % 5_000 == 0:
+                elapsed = time.time() - t0
+                size_mb = out_path.stat().st_size / 1e6
+                rate = written / elapsed
+                eta = (max_docs - written) / rate if rate > 0 else 0
+                print(f"  {written:,}/{max_docs:,} files  {size_mb:.1f}MB  {rate:.0f} files/s  ETA {eta:.0f}s")
 
     elapsed = time.time() - t0
     size_mb = out_path.stat().st_size / 1e6
-    print(f"  Done: {written:,} files, {size_mb:.1f} MB compressed ({elapsed:.0f}s)")
+    print(f"  Done: {written:,} files ({skipped:,} skipped), {size_mb:.1f} MB compressed ({elapsed:.0f}s)")
     return written
 
 
