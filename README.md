@@ -22,21 +22,19 @@ tokenismo v6 (262k vocab) beats every competitor on compression **and** throughp
 
 | Tokenizer          |       EN |       RU |     Code | vs o200k |
 |:-------------------|---------:|---------:|---------:|---------:|
-| tiktoken cl100k    |      9.9 |      9.4 |      6.7 |     0.6x |
-| tiktoken o200k     |     16.8 |     12.9 |      9.7 |     1.0x |
-| XLM-R (250k)       |      2.0 |      3.1 |      2.2 |     0.1x |
-| mBERT (120k)       |      2.3 |      3.0 |      1.9 |     0.1x |
-| **tokenismo v6**   |   **98.8** | **138.1** | **86.1** | **5.9x** |
+| tiktoken cl100k    |      8.8 |      8.1 |      5.4 |     0.7x |
+| tiktoken o200k     |     13.5 |      8.1 |      6.3 |     1.0x |
+| **tokenismo v6**   |   **76.0** | **92.0** | **55.8** | **5.6x** |
 
 ### tokenismo v6 vs tiktoken o200k
 
-- **EN**: +2.1% compression, **5.9x** faster
-- **RU**: +37.7% compression, **10.7x** faster
+- **EN**: +2.1% compression, **5.6x** faster
+- **RU**: +37.7% compression, **11.4x** faster
 - **Code**: +1.3% compression, **8.9x** faster
 - **RU/EN ratio**: **0.827x** — Russian is cheaper to tokenize than English
 
 > Benchmarked on 64 KB inputs, Python API (PyO3), warm cache.
-> Run `python scripts/benchmark_competitors.py` to reproduce.
+> Run `python scripts/benchmark_competitors.py --no-hf` to reproduce.
 
 ## Algorithm
 
@@ -55,6 +53,7 @@ Key design choices:
 - **`LEADING_SPACE_FLAG = 1 << 22`** — leading spaces are encoded as a bit flag on the following token, eliminating standalone space tokens
 - **Thread-local DP buffer** — avoids O(n) heap allocation per `encode()` call; buffer is reused across calls on the same thread
 - **Unicode-aware pruning** — Cyrillic, CJK, and other multi-byte single characters are never pruned from the vocabulary
+- **Graceful OOV handling** — characters outside the vocabulary emit `<unk>` per UTF-8 character; bytes after the gap are re-encoded normally rather than lost
 
 ## Quick Start
 
@@ -159,6 +158,9 @@ pytest python/tests/ -v
 
 # Throughput benchmark (requires trained vocab)
 python scripts/bench_throughput.py
+
+# Stress test — encode/decode round-trip on 58 extreme cases
+python scripts/run_stress_test.py
 ```
 
 ## Project Structure
@@ -177,7 +179,7 @@ python/               Python package root
   tests/              Python integration tests
 configs/              Corpus YAML configs (sample + full)
 data/                 Vocab files and sample corpus
-scripts/              Utility scripts (bench, wiki converter)
+scripts/              Utility scripts (bench, stress test, corpus download)
 Tasks/                Project roadmap and task files
 ```
 
