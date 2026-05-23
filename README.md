@@ -6,16 +6,37 @@ bindings via PyO3.
 
 ## Why TokeNismo?
 
-| Metric | OpenAI o200k\_base | TokeNismo (8k vocab) |
-|--------|-------------------|----------------------|
-| RU/EN token ratio | 1.324× | **1.199×** |
-| Russian vs o200k | 1.0× (baseline) | **0.95×** (fewer tokens) |
-| Code vs o200k | 1.0× (baseline) | **0.52×** (2× fewer tokens) |
+tokenismo v6 (262k vocab) beats every competitor on compression **and** throughput:
 
-Lower ratio = fewer tokens = cheaper API calls for Russian and code-heavy workloads.
+### Compression (chars per token — higher is better)
 
-With a 262k-token vocabulary the RU/EN ratio is expected to drop below **1.1×**,
-approaching parity.
+| Tokenizer          | Vocab  |     EN |     RU |   Code | RU/EN ratio |
+|:-------------------|-------:|------:|------:|------:|------------:|
+| tiktoken cl100k    |   100k |   5.54 |   2.29 |   4.03 |      2.039x |
+| tiktoken o200k     |   200k |   5.58 |   4.21 |   4.04 |      1.115x |
+| XLM-R (250k)       |   250k |   4.50 |   4.25 |   3.10 |      0.890x |
+| mBERT (120k)       |   120k |   4.80 |   3.73 |   2.50 |      1.084x |
+| **tokenismo v6**   | **262k** | **5.69** | **5.80** | **4.09** | **0.827x** |
+
+### Throughput (MB/s on 64 KB input — higher is better)
+
+| Tokenizer          |       EN |       RU |     Code | vs o200k |
+|:-------------------|---------:|---------:|---------:|---------:|
+| tiktoken cl100k    |      9.9 |      9.4 |      6.7 |     0.6x |
+| tiktoken o200k     |     16.8 |     12.9 |      9.7 |     1.0x |
+| XLM-R (250k)       |      2.0 |      3.1 |      2.2 |     0.1x |
+| mBERT (120k)       |      2.3 |      3.0 |      1.9 |     0.1x |
+| **tokenismo v6**   |   **98.8** | **138.1** | **86.1** | **5.9x** |
+
+### tokenismo v6 vs tiktoken o200k
+
+- **EN**: +2.1% compression, **5.9x** faster
+- **RU**: +37.7% compression, **10.7x** faster
+- **Code**: +1.3% compression, **8.9x** faster
+- **RU/EN ratio**: **0.827x** — Russian is cheaper to tokenize than English
+
+> Benchmarked on 64 KB inputs, Python API (PyO3), warm cache.
+> Run `python scripts/benchmark_competitors.py` to reproduce.
 
 ## Algorithm
 
@@ -92,25 +113,14 @@ Training options:
 
 ## Benchmarks
 
-### Throughput (Rust encoder, single thread)
+See [Why TokeNismo?](#why-tokenismo) above for the full comparison table.
 
-Measured on a minimal 8k vocab with ASCII-only input:
+To reproduce:
 
-```
-Throughput (best of 5): 14 MB/s
-Input: 6,400 KB -> 1,220,000 tokens
-```
-
-> The 500 MB/s target requires a compact double-array trie (currently flat
-> 256-children array). This optimization is tracked in TASK-03.
-
-### Compression vs tiktoken o200k\_base (8k vocab, sample corpus)
-
-```
-English text:   TokeNismo 1.05×  (slightly more tokens — expected at 8k vocab)
-Russian text:   TokeNismo 0.95×  (5% fewer tokens than o200k)
-Python code:    TokeNismo 0.52×  (2× fewer tokens than o200k)
-RU/EN ratio:    TokeNismo 1.20×  (target ≤ 1.5 — ACHIEVED)
+```bash
+python scripts/benchmark_competitors.py        # full benchmark (downloads XLM-R, mBERT)
+python scripts/benchmark_competitors.py --no-hf  # tiktoken + tokenismo only
+cargo run --release --bin quick_bench           # Rust-level throughput by input size
 ```
 
 ## Vocabulary Format (`.vocab`)
