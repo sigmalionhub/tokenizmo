@@ -181,7 +181,6 @@ python/               Python package root
 configs/              Corpus YAML configs (sample + full)
 data/                 Vocab files and sample corpus
 scripts/              Utility scripts (bench, stress test, corpus download)
-Tasks/                Project roadmap and task files
 ```
 
 ## License
