@@ -185,4 +185,4 @@ scripts/              Utility scripts (bench, stress test, corpus download)
 
 ## License
 
-MIT
+Apache 2.0 — see [LICENSE](LICENSE).
