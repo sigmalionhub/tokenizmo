@@ -354,15 +354,32 @@ impl Encoder {
     }
 }
 
-/// Split `bytes` into ~`min_bytes`-sized chunks at word boundaries for
-/// parallel encoding.  Spaces are kept at the *start* of the following chunk.
+/// Split `bytes` into ~`min_bytes`-sized chunks at word/indentation boundaries
+/// for parallel encoding.  Multi-space indentation runs (≥ 2 spaces) act as
+/// hard chunk boundaries so that each Rayon task starts at a clean indent.
 fn split_words(bytes: &[u8], min_bytes: usize) -> Vec<&[u8]> {
     let n = bytes.len();
     let mut chunks = Vec::new();
     let mut chunk_start = 0;
     let mut i = 0;
     while i < n {
+        let word_start = i;
         while i < n && bytes[i] == b' ' { i += 1; }
+        let space_count = i - word_start;
+
+        // Indentation block (≥ 2 spaces): treat as a hard boundary so the
+        // spaces and the following word land in separate chunks if large enough.
+        if space_count >= 2 {
+            if i - chunk_start >= min_bytes && i < n {
+                chunks.push(&bytes[chunk_start..word_start]);
+                chunk_start = word_start;
+            }
+            if i - chunk_start >= min_bytes && i < n {
+                chunks.push(&bytes[chunk_start..i]);
+                chunk_start = i;
+            }
+        }
+
         while i < n && bytes[i] != b' ' { i += 1; }
         if i - chunk_start >= min_bytes && i < n {
             chunks.push(&bytes[chunk_start..i]);
@@ -375,12 +392,19 @@ fn split_words(bytes: &[u8], min_bytes: usize) -> Vec<&[u8]> {
     chunks
 }
 
-/// Split `bytes` into individual words for per-word caching.
+/// Split `bytes` into individual words and indentation blocks for caching.
 ///
-/// Each word slice includes its optional leading spaces so that
-/// `encode_into` sees the space and sets `LEADING_SPACE_FLAG` correctly.
+/// **Multi-space sequences (≥ 2 spaces)** are isolated as their own chunks so
+/// that Viterbi can encode them atomically and cache the result across ALL
+/// indented lines — eliminating redundant DP work for code indentation.
 ///
-/// Example: `"hello world foo"` → `["hello", " world", " foo"]`
+/// **Single leading spaces** (1 space) stay attached to the following word so
+/// that `encode_into` sets `LEADING_SPACE_FLAG` correctly — preserving prose
+/// EN/RU parity exactly as before.
+///
+/// Examples:
+/// - `"hello world"` → `["hello", " world"]`  (single space, flag preserved)
+/// - `"    if x:"` → `["    ", "if", " x:"]`  (indent split, then normal)
 fn split_individual_words(bytes: &[u8]) -> Vec<&[u8]> {
     let n = bytes.len();
     let mut words = Vec::new();
@@ -388,9 +412,24 @@ fn split_individual_words(bytes: &[u8]) -> Vec<&[u8]> {
     while i < n {
         let start = i;
         while i < n && bytes[i] == b' ' { i += 1; }
-        while i < n && bytes[i] != b' ' { i += 1; }
-        if i > start {
+        let space_count = i - start;
+
+        if space_count > 1 {
+            // Indentation block: emit spaces as a separate atomic chunk, then
+            // the following word as its own chunk (no leading-space attachment).
             words.push(&bytes[start..i]);
+            let word_start = i;
+            while i < n && bytes[i] != b' ' { i += 1; }
+            if i > word_start {
+                words.push(&bytes[word_start..i]);
+            }
+        } else {
+            // Standard path: 0 or 1 leading space stays with the word so that
+            // `encode_into` can apply LEADING_SPACE_FLAG (prose behaviour).
+            while i < n && bytes[i] != b' ' { i += 1; }
+            if i > start {
+                words.push(&bytes[start..i]);
+            }
         }
     }
     words

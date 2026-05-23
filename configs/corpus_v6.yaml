@@ -1,0 +1,58 @@
+# Mix v6: 40% Code / 40% EN / 20% RU
+# Code is split evenly across 5 languages (8% each = 40% total).
+# Pre-tokenizer (split_individual_words) is applied during seeding — indentation
+# blocks like "    " become high-frequency candidates for better code compression.
+#
+# Download:
+#   python scripts/download_corpus.py \
+#     --hf-token hf_... --en-docs 100000 --ru-docs 50000 --code-docs 40000
+#
+# Train:
+#   cargo run --release --bin tokenismo-train -- \
+#     --config configs/corpus_v6.yaml --vocab-size 262144 \
+#     --min-freq 5 --max-docs 150000 --output data/vocab/tokenismo_v6.vocab
+
+mix_ratios:
+  en:   0.40
+  ru:   0.20
+  code_py:  0.08
+  code_go:  0.08
+  code_rs:  0.08
+  code_cpp: 0.08
+  code_ts:  0.08
+
+sources:
+  - path: data/corpus/wiki_en.jsonl.gz
+    language: en
+    reader: jsonl_gz
+    text_field: text
+
+  - path: data/corpus/wiki_ru.jsonl.gz
+    language: ru
+    reader: jsonl_gz
+    text_field: text
+
+  - path: data/corpus/stack_python.jsonl.gz
+    language: code_py
+    reader: jsonl_gz
+    text_field: content
+
+  - path: data/corpus/stack_go.jsonl.gz
+    language: code_go
+    reader: jsonl_gz
+    text_field: content
+
+  - path: data/corpus/stack_rust.jsonl.gz
+    language: code_rs
+    reader: jsonl_gz
+    text_field: content
+
+  - path: data/corpus/stack_cpp.jsonl.gz
+    language: code_cpp
+    reader: jsonl_gz
+    text_field: content
+
+  - path: data/corpus/stack_ts.jsonl.gz
+    language: code_ts
+    reader: jsonl_gz
+    text_field: content

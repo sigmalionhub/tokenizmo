@@ -65,48 +65,64 @@ fn count_text_substrings(
     counts: &mut HashMap<Vec<u8>, u64>,
     starts_buf: &mut Vec<usize>,
 ) {
-    // Split on whitespace (\x09 \x0a \x0d \x20) and process each word.
-    let mut start = 0;
-    let n = data.len();
-    while start < n {
-        // Skip whitespace.
-        while start < n && is_whitespace(data[start]) {
-            start += 1;
-        }
-        if start >= n {
-            break;
-        }
-        // Find end of word.
-        let mut end = start;
-        while end < n && !is_whitespace(data[end]) {
-            end += 1;
-        }
-        // Collect char-start positions within this word (skip UTF-8 continuation bytes).
-        let word = &data[start..end];
-        let wn = word.len();
-        starts_buf.clear();
-        starts_buf.extend((0..wn).filter(|&i| !(0x80..=0xBF).contains(&word[i])));
-        let ns = starts_buf.len();
-
-        for si in 0..ns {
-            let s = starts_buf[si];
-            for ei in (si + 1)..=(ns) {
-                let e = if ei < ns { starts_buf[ei] } else { wn };
-                if e - s > max_token_len {
-                    break;
+    // Split on newlines, then apply the same word-unit pre-tokenization as the
+    // encoder's `split_individual_words`:
+    //   - multi-space (≥2) → isolated unit (the spaces ARE the token bytes)
+    //   - single leading space → stripped (becomes LEADING_SPACE_FLAG at encode time)
+    //   - no leading space → count as-is
+    // This ensures indentation blocks like "    " become high-frequency candidates.
+    for raw_line in data.split(|&b| b == b'\n') {
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        for unit in split_line_into_units(line) {
+            // Strip single leading space — it's LEADING_SPACE_FLAG, not a vocab byte.
+            let count_bytes = if unit.len() >= 2 && unit[0] == b' ' && unit[1] != b' ' {
+                &unit[1..]
+            } else {
+                unit
+            };
+            if count_bytes.is_empty() {
+                continue;
+            }
+            let n = count_bytes.len();
+            starts_buf.clear();
+            starts_buf.extend((0..n).filter(|&i| !(0x80..=0xBF).contains(&count_bytes[i])));
+            let ns = starts_buf.len();
+            for si in 0..ns {
+                let s = starts_buf[si];
+                for ei in (si + 1)..=(ns) {
+                    let e = if ei < ns { starts_buf[ei] } else { n };
+                    if e - s > max_token_len {
+                        break;
+                    }
+                    *counts.entry(count_bytes[s..e].to_vec()).or_default() += 1;
                 }
-                let tok = &word[s..e];
-                *counts.entry(tok.to_vec()).or_default() += 1;
             }
         }
-
-        start = end;
     }
 }
 
-#[inline(always)]
-fn is_whitespace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+/// Split one line of text into word units using the same logic as the encoder's
+/// `split_individual_words`: multi-space (≥2) → own unit; single space →
+/// stays attached to the following word.
+fn split_line_into_units(line: &[u8]) -> Vec<&[u8]> {
+    let n = line.len();
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let start = i;
+        while i < n && line[i] == b' ' { i += 1; }
+        let space_count = i - start;
+        if space_count > 1 {
+            units.push(&line[start..i]);
+            let word_start = i;
+            while i < n && line[i] != b' ' { i += 1; }
+            if i > word_start { units.push(&line[word_start..i]); }
+        } else {
+            while i < n && line[i] != b' ' { i += 1; }
+            if i > start { units.push(&line[start..i]); }
+        }
+    }
+    units
 }
 
 /// Add guaranteed single-character tokens so the encoder never fails.
