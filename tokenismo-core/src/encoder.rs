@@ -243,16 +243,22 @@ impl Encoder {
                     pos = entry.prev_pos as usize;
                 }
             }
-            let mut i = last_ok;
-            while i < n {
-                let b = unsafe { *bytes.get_unchecked(i) };
-                let char_len = if b < 0x80 { 1 }
-                    else if b < 0xC0 { 1 }
-                    else if b < 0xE0 { 2 }
-                    else if b < 0xF0 { 3 }
-                    else              { 4 };
-                out.push(self.unk_id);
-                i += char_len.min(n - i);
+            // Emit <unk> for the first OOV character, then re-encode the suffix
+            // so that bytes after the gap are encoded normally rather than lost.
+            let b = unsafe { *bytes.get_unchecked(last_ok) };
+            let char_len = (if b < 0x80 { 1 }
+                else if b < 0xC0 { 1 }
+                else if b < 0xE0 { 2 }
+                else if b < 0xF0 { 3 }
+                else              { 4 }).min(n - last_ok);
+            out.push(self.unk_id);
+            let next = last_ok + char_len;
+            if next < n {
+                // SAFETY: bytes is valid UTF-8 (caller guarantees &str input),
+                // and next lands on a char boundary (char_len is the full
+                // UTF-8 sequence length for the OOV character we just skipped).
+                let suffix = unsafe { std::str::from_utf8_unchecked(&bytes[next..]) };
+                self.encode_into(suffix, dp_buf, out);
             }
             return;
         }

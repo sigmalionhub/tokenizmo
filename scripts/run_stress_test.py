@@ -1,18 +1,22 @@
-"""Run all test_cases.json through tokenismo v6 and verify round-trips."""
-import json, sys, io
+"""Run all test_cases.json through a tokenismo vocab and verify round-trips."""
+import argparse, json, sys, io
 from pathlib import Path
 
-# Force UTF-8 output so emoji/Cyrillic don't crash on Windows cp1251 console.
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 from tokenismo import TokeNismo
 
-with open(ROOT / "data" / "test_cases.json", encoding="utf-8") as f:
+parser = argparse.ArgumentParser()
+parser.add_argument("--vocab", default=str(ROOT / "data" / "vocab" / "tokenismo_v6.vocab"))
+parser.add_argument("--cases", default=str(ROOT / "data" / "test_cases.json"))
+args = parser.parse_args()
+
+with open(args.cases, encoding="utf-8") as f:
     cases = json.load(f)
 
-tok = TokeNismo.from_file(str(ROOT / "data" / "vocab" / "tokenismo_v6.vocab"))
+tok = TokeNismo.from_file(args.vocab)
 
 ok = 0
 failures = []

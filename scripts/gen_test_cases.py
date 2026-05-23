@@ -109,6 +109,11 @@ cases = [
     "\U00010000\U00010001\U00010002\U00010003 Linear B Syllabary",
     "    if True:\n        pass\n    elif False:\n        pass\n    else:\n        pass",
     " " * 256 + "// 256 пробелов потом комментарий",
+
+    # ── 5. MID-WORD OOV — encodable chars after OOV gap must not become <unk>
+    "hell\U0001f980o",                          # ASCII + OOV emoji + ASCII
+    "fn\U0001f525main()",                       # code token + OOV + code token
+    "word\U00010000next",                       # Linear B embedded in ASCII word
 ]
 
 out = ROOT / "data" / "test_cases.json"
