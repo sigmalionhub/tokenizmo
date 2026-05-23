@@ -141,8 +141,10 @@ fn bench_hybrid_vs_full_darts(c: &mut Criterion) {
         hybrid_trie.long_token_count(),
     );
 
-    let hybrid_enc = Encoder { trie: Arc::new(hybrid_trie) };
-    let full_enc   = Encoder { trie: Arc::new(full_trie) };
+    let hybrid_trie = Arc::new(hybrid_trie);
+    let full_trie   = Arc::new(full_trie);
+    let hybrid_enc = Encoder { trie: hybrid_trie.clone(), unk_id: hybrid_trie.get(b"<unk>").unwrap_or(0) };
+    let full_enc   = Encoder { trie: full_trie.clone(),   unk_id: full_trie.get(b"<unk>").unwrap_or(0) };
 
     let samples: &[(&str, &str)] = &[
         (

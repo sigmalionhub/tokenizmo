@@ -139,6 +139,9 @@ pub fn add_guaranteed_tokens(counts: &mut HashMap<Vec<u8>, u64>) {
         (0x0370, 0x0400), // Greek and Coptic
         (0x0400, 0x0530), // Cyrillic + Supplement
         (0x4E00, 0x4F00), // CJK sample (first 256)
+        (0x1F000, 0x1F100), // Mahjong/Domino tiles + misc symbols
+        (0x1F300, 0x1F700), // Emoji: weather, plants, animals, food, travel, symbols
+        (0x1F900, 0x1FA00), // Supplemental symbols and pictographs
     ];
     for &(start, end) in RANGES {
         for cp in start..end {

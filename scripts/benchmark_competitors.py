@@ -20,8 +20,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import io
 import sys
 import time
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent

@@ -46,6 +46,7 @@ thread_local! {
 
 pub struct Encoder {
     pub trie: Arc<VocabTrie>,
+    pub unk_id: u32,
 }
 
 impl Encoder {
@@ -57,7 +58,8 @@ impl Encoder {
             !trie.darts.is_empty(),
             "Encoder: call trie.finalize() before wrapping in Arc when sharing with other owners"
         );
-        Self { trie }
+        let unk_id = trie.get(b"<unk>").unwrap_or(0);
+        Self { trie, unk_id }
     }
 
     /// Number of words cached on the calling thread.
@@ -222,14 +224,37 @@ impl Encoder {
 
         // ── Backtrack ────────────────────────────────────────────────────────
         if dp_buf[n].count == u32::MAX {
-            // Every byte must be reachable via add_guaranteed_tokens; if we get
-            // here the vocabulary is missing coverage (binary input or broken
-            // vocab).  Panic loudly rather than silently emitting wrong IDs.
-            panic!(
-                "encode: text not fully reachable — \
-                 vocabulary missing coverage for input of {} bytes",
-                n
-            );
+            let mut last_ok = 0usize;
+            for k in 1..=n {
+                if dp_buf[k].count != u32::MAX {
+                    last_ok = k;
+                }
+            }
+            if last_ok > 0 {
+                let covered_count = dp_buf[last_ok].count as usize;
+                let start_idx = out.len();
+                out.resize(start_idx + covered_count, 0);
+                let mut pos = last_ok;
+                let mut write_idx = start_idx + covered_count;
+                while pos > 0 {
+                    let entry = unsafe { *dp_buf.get_unchecked(pos) };
+                    write_idx -= 1;
+                    unsafe { *out.get_unchecked_mut(write_idx) = entry.token_id; }
+                    pos = entry.prev_pos as usize;
+                }
+            }
+            let mut i = last_ok;
+            while i < n {
+                let b = unsafe { *bytes.get_unchecked(i) };
+                let char_len = if b < 0x80 { 1 }
+                    else if b < 0xC0 { 1 }
+                    else if b < 0xE0 { 2 }
+                    else if b < 0xF0 { 3 }
+                    else              { 4 };
+                out.push(self.unk_id);
+                i += char_len.min(n - i);
+            }
+            return;
         }
 
         let token_count = dp_buf[n].count as usize;
@@ -455,7 +480,9 @@ mod tests {
             trie.insert(tok, *lp);
         }
         trie.finalize_with_depth(usize::MAX);
-        Encoder { trie: Arc::new(trie) }
+        let trie = Arc::new(trie);
+        let unk_id = trie.get(b"<unk>").unwrap_or(0);
+        Encoder { trie, unk_id }
     }
 
     /// Build encoder with hybrid DARTS+HashMap using given depth limit.
@@ -465,7 +492,9 @@ mod tests {
             trie.insert(tok, *lp);
         }
         trie.finalize_with_depth(depth);
-        Encoder { trie: Arc::new(trie) }
+        let trie = Arc::new(trie);
+        let unk_id = trie.get(b"<unk>").unwrap_or(0);
+        Encoder { trie, unk_id }
     }
 
     #[test]
