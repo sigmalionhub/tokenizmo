@@ -14,6 +14,21 @@ Beats OpenAI `o200k_base` on Russian/English parity (target: ≤ 1.5x token rati
 | 4 Bindings | TASK-04 | ✅ Done |
 | 5 Benchmarks | TASK-05 | ✅ Done |
 | 6 Hardening | TASK-06 | ✅ Done |
+| 12 Mix v6 | TASK-12 | ✅ Done |
+
+### Mix v6 Results (tokenismo_v6.vocab vs tiktoken o200k_base)
+
+| Metric | EN | RU | Code |
+|--------|----|----|------|
+| Compression (cpt) | 5.69 vs 5.58 (**+2.1%**) | 5.80 vs 4.21 (**+37.7%**) | 4.09 vs 4.04 (**+1.3%**) |
+| Throughput (64KB) | 78 vs 16 MB/s (**4.8x**) | 124 vs 13 MB/s (**9.7x**) | 83 vs 10 MB/s (**8.8x**) |
+
+**Beats o200k on all three fronts.** Vocab: `data/vocab/tokenismo_v6.vocab`
+
+Key changes in v6:
+- `seed.rs`: pre-tokenizer applied during seeding — multi-space indentation blocks isolated as own units
+- `encoder.rs`: `split_individual_words` isolates `"    "` for cache reuse across all indented lines
+- Corpus: 40% Code (Go/Java/JS + Python) / 40% EN / 20% RU via `configs/corpus_v6.yaml`
 
 ---
 
